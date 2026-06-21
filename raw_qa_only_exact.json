@@ -1,0 +1,18 @@
+{
+    "error": {
+        "code": 400,
+        "message": "Data stores projects/min-sung-jae-cloud/locations/global/collections/default_collection/dataStores/ds02-gpt-jeonse-qa in data_store_specs are not found in the engine projects/684756448782/locations/global/collections/default_collection/engines/app-banking-advisory-app_1781761252022.",
+        "status": "INVALID_ARGUMENT",
+        "details": [
+            {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "DATA_STORE_SPEC_INVALID",
+                "domain": "discoveryengine.googleapis.com",
+                "metadata": {
+                    "dataStoreIds": "projects/min-sung-jae-cloud/locations/global/collections/default_collection/dataStores/ds02-gpt-jeonse-qa",
+                    "engineId": "projects/684756448782/locations/global/collections/default_collection/engines/app-banking-advisory-app_1781761252022"
+                }
+            }
+        ]
+    }
+}
