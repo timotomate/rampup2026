@@ -3,6 +3,12 @@ import re
 from google.adk.agents import Agent
 from .ge_search import search_gemini_enterprise
 
+from .audit_logger import (
+    before_model_capture_question,
+    after_tool_capture_search,
+    after_model_log_qa,
+)
+
 
 # 기능1 : 질문 유형 분류(이 부분 추후 고도화 필요)
 # ver0.2
@@ -784,6 +790,9 @@ root_agent = Agent(
     name="jeonse_guarantee_agent",
     model="gemini-2.5-flash",
     description="전세보증 상담원, 행원을 보조하는 ADK 기반 Agent입니다.",
+    before_model_callback=before_model_capture_question,
+    after_tool_callback=after_tool_capture_search,
+    after_model_callback=after_model_log_qa,
     instruction="""
 당신은 GS Bank의 전세자금대출 / 전세대출보증 / 전세보증보험 상담원(행원)을 보조하는 ADK 기반 Agent입니다.
 
