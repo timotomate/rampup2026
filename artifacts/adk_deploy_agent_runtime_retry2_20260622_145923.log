@@ -1,0 +1,17 @@
+Staging all files in: /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145923/agents/jeonse_guarantee_agent
+Copying agent source code...
+Copying agent source code complete.
+Resolving files and dependencies...
+Reading environment variables from /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent/.env
+Ignoring GOOGLE_CLOUD_PROJECT in .env as `--project` was explicitly passed and takes precedence
+Ignoring GOOGLE_CLOUD_LOCATION in .env as `--region` was explicitly passed and takes precedence
+Initializing Agent Platform client...
+Agent Platform client initialized with project and region.
+Deploying to Agent Platform...
+Created a new instance: projects/684756448782/locations/us-central1/reasoningEngines/3724536815219113984
+Creating Dockerfile...
+Dockerfile created at /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145923/Dockerfile.
+Failed to deploy to Agent Platform: Failed to update Agent Engine: {'code': 3, 'message': 'Reasoning Engine resource [projects/684756448782/locations/us-central1/reasoningEngines/3724536815219113984] failed to start and cannot serve traffic. Please refer to our troubleshooting pages (e.g., https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment) to debug and fix the error.'}
+Cleaned up the instance: projects/684756448782/locations/us-central1/reasoningEngines/3724536815219113984
+Cleaning up the temp folder: /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145923
+Deploy failed: Failed to update Agent Engine: {'code': 3, 'message': 'Reasoning Engine resource [projects/684756448782/locations/us-central1/reasoningEngines/3724536815219113984] failed to start and cannot serve traffic. Please refer to our troubleshooting pages (e.g., https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment) to debug and fix the error.'}

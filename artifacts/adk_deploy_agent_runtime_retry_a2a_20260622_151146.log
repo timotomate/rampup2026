@@ -1,0 +1,19 @@
+Staging all files in: /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_151146/agents/jeonse_guarantee_agent
+Copying agent source code...
+Copying agent source code complete.
+Resolving files and dependencies...
+Reading environment variables from /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent/.env
+Ignoring GOOGLE_CLOUD_PROJECT in .env as `--project` was explicitly passed and takes precedence
+Ignoring GOOGLE_CLOUD_LOCATION in .env as `--region` was explicitly passed and takes precedence
+Initializing Agent Platform client...
+Agent Platform client initialized with project and region.
+Deploying to Agent Platform...
+Created a new instance: projects/684756448782/locations/us-central1/reasoningEngines/4496904151313154048
+Creating Dockerfile...
+Dockerfile created at /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_151146/Dockerfile.
+Deployed to Agent Platform: projects/684756448782/locations/us-central1/reasoningEngines/4496904151313154048
+
+🎉 View your deployed agent here:
+https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/4496904151313154048/playground?project=684756448782
+
+Cleaning up the temp folder: /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_151146

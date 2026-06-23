@@ -1,0 +1,20 @@
+WARNING: --<Option requirements_file> is deprecated and will be removed. Please leave it unspecified.
+WARNING: --<Option env_file> is deprecated and will be removed. Please leave it unspecified.
+WARNING: --<Option validate_agent_import> is deprecated and will be removed. Please leave it unspecified.
+Staging all files in: /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145137/agents/jeonse_guarantee_agent
+Copying agent source code...
+Copying agent source code complete.
+Resolving files and dependencies...
+Creating /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145137/agents/jeonse_guarantee_agent/requirements.txt...
+Using google-adk==2.2.0 in requirements
+Created /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145137/agents/jeonse_guarantee_agent/requirements.txt
+Initializing Agent Platform client...
+Agent Platform client initialized with project and region.
+Deploying to Agent Platform...
+Created a new instance: projects/684756448782/locations/us-central1/reasoningEngines/2821459536815063040
+Creating Dockerfile...
+Dockerfile created at /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145137/Dockerfile.
+Failed to deploy to Agent Platform: Failed to update Agent Engine: {'code': 3, 'message': 'Reasoning Engine resource [projects/684756448782/locations/us-central1/reasoningEngines/2821459536815063040] failed to start and cannot serve traffic. Please refer to our troubleshooting pages (e.g., https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment) to debug and fix the error.'}
+Cleaned up the instance: projects/684756448782/locations/us-central1/reasoningEngines/2821459536815063040
+Cleaning up the temp folder: /Users/thetimo/Desktop/jeonse_ver0.2/jeonse_guarantee_agent_tmp20260622_145137
+Deploy failed: Failed to update Agent Engine: {'code': 3, 'message': 'Reasoning Engine resource [projects/684756448782/locations/us-central1/reasoningEngines/2821459536815063040] failed to start and cannot serve traffic. Please refer to our troubleshooting pages (e.g., https://docs.cloud.google.com/gemini-enterprise-agent-platform/troubleshooting/agent-deployment) to debug and fix the error.'}
