@@ -18,6 +18,11 @@ from .schemas import (
     EvidenceReviewResult,
     ConsultationDraft,
 )
+from .state_keys import (
+    QUESTION_CLASSIFICATION,
+    EVIDENCE_REVIEW,
+    CONSULTATION_DRAFT,
+)
 
 
 def build_question_classifier_agent() -> Agent:
@@ -36,7 +41,7 @@ def build_question_classifier_agent() -> Agent:
         description="전세보증 상담 질문을 구조화하고 검색 방향을 결정하는 sub-agent입니다.",
         instruction=QUESTION_CLASSIFIER_INSTRUCTION,
         output_schema=JeonseQuestionClassification,
-        output_key="question_classification",
+        output_key=QUESTION_CLASSIFICATION,
     )
 
 
@@ -55,7 +60,7 @@ def build_evidence_reviewer_agent() -> Agent:
         description="검색된 외규/내규/Q&A 근거를 검토하고 충돌 가능성을 정리하는 sub-agent입니다.",
         instruction=EVIDENCE_REVIEWER_INSTRUCTION,
         output_schema=EvidenceReviewResult,
-        output_key="evidence_review",
+        output_key=EVIDENCE_REVIEW,
     )
 
 
@@ -73,5 +78,5 @@ def build_consultation_finalizer_agent() -> Agent:
         description="상담원용 최종 답변 초안을 작성하는 sub-agent입니다.",
         instruction=CONSULTATION_FINALIZER_INSTRUCTION,
         output_schema=ConsultationDraft,
-        output_key="consultation_draft",
+        output_key=CONSULTATION_DRAFT,
     )
