@@ -180,6 +180,42 @@ def _extract_response_text(llm_response: Any) -> str:
     return _extract_text_from_content(content)
 
 
+def _final_answer_filter_enabled() -> bool:
+    """중간 sub-agent 응답이 BigQuery에 저장되지 않도록 최종 답변 필터를 켭니다."""
+    return os.getenv("QA_LOG_ONLY_FINAL_ANSWER", "TRUE").upper() not in {
+        "FALSE",
+        "0",
+        "NO",
+        "N",
+    }
+
+
+def _looks_like_final_consultation_answer(answer: str) -> bool:
+    """
+    BigQuery audit log에 저장할 '최종 상담 답변'인지 판별합니다.
+
+    multi-agent 구조로 전환되면 classifier/reviewer/finalizer 등 여러 LLM 응답이 생길 수 있습니다.
+    이 함수는 질문분류/근거검토 같은 중간 산출물이 BigQuery Q/A 로그에 저장되는 것을 막기 위한 안전장치입니다.
+
+    현재 전세보증 상담 Agent의 최종 답변 포맷:
+    - [상담 답변 초안]
+    - [추가 확인 항목]
+    - [참고 근거]
+    - [주의 문구]
+    """
+    if not answer:
+        return False
+
+    normalized = answer.strip()
+
+    required_headers = [
+        "[상담 답변 초안]",
+        "[주의 문구]",
+    ]
+
+    return all(header in normalized for header in required_headers)
+
+
 def _detected_label(replacement: Any) -> str:
     if callable(replacement):
         # callable은 주민번호/전화번호처럼 부분 마스킹을 위한 규칙입니다.
@@ -346,7 +382,12 @@ def after_model_log_qa(callback_context: Any, llm_response: Any) -> None:
     if not answer:
         return None
 
-    # 상담 답변 초안 형식이거나, 일반 답변이라도 text final response로 보이면 로그 대상으로 봅니다.
+    # multi-agent 구조에서는 classifier/reviewer 등 중간 LLM 응답도 after_model_callback 대상이 될 수 있습니다.
+    # 따라서 기본적으로 최종 상담 답변 포맷을 가진 응답만 BigQuery Q/A audit log에 저장합니다.
+    if _final_answer_filter_enabled() and not _looks_like_final_consultation_answer(answer):
+        print("[qa-audit-log] skipped non-final model response")
+        return None
+
     question = _get_state_value(callback_context.state, "qa_current_question", "")
     if not question:
         return None
