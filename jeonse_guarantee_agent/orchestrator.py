@@ -4,8 +4,10 @@ Jeonse Guarantee Advisory Agent Orchestrator.
 
 이 파일은 향후 root_agent를 오케스트레이션 전용 Agent로 전환하기 위한 준비 파일입니다.
 
-현재 단계에서는 이 클래스를 agent.py에 연결하지 않습니다.
-즉, 기존 GE 진입점과 기존 root_agent 동작에는 영향을 주지 않습니다.
+현재 단계:
+- JeonseOrchestrator 내부에 실제 실행 흐름 초안을 구현합니다.
+- 하지만 아직 agent.py의 root_agent로 연결하지 않습니다.
+- 따라서 기존 GE 진입점과 기존 root_agent 동작에는 영향을 주지 않습니다.
 
 향후 목표 흐름:
 1. 사용자 질문 수신
@@ -19,12 +21,24 @@ Jeonse Guarantee Advisory Agent Orchestrator.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, AsyncGenerator, Optional
 
 from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
+
+from .state_keys import (
+    USER_QUESTION,
+    QUESTION_CLASSIFICATION,
+    SEARCH_RESULTS,
+    SEARCH_METADATA,
+    EVIDENCE_REVIEW,
+    CONSULTATION_DRAFT,
+    FINAL_ANSWER,
+    AUDIT_LOG_WRITTEN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +53,8 @@ class JeonseOrchestrator(BaseAgent):
     - BigQuery audit log가 중복 저장되지 않도록 최종 단계에서 1회만 기록하는 구조를 목표로 합니다.
 
     주의:
-    - 현재 1차 skeleton 단계에서는 실제 실행에 연결하지 않습니다.
-    - _run_async_impl 역시 아직 실제 orchestration flow를 구현하지 않습니다.
+    - 현재 단계에서는 아직 agent.py의 root_agent에 연결하지 않습니다.
+    - 검색 tool도 아직 직접 호출하지 않습니다.
     """
 
     question_classifier_agent: Any
@@ -78,27 +92,174 @@ class JeonseOrchestrator(BaseAgent):
         ctx: InvocationContext,
     ) -> AsyncGenerator[Event, None]:
         """
-        향후 구현 예정인 실제 orchestration flow입니다.
+        전세보증 상담 오케스트레이션 실행 흐름 초안입니다.
 
-        예상 구현 순서:
-        1. question_classifier_agent.run_async(ctx)
-        2. ctx.session.state["question_classification"] 확인
-        3. search_regulation_documents 실행 또는 검색 helper 호출
-        4. ctx.session.state에 검색 결과 저장
-        5. evidence_reviewer_agent.run_async(ctx)
-        6. consultation_finalizer_agent.run_async(ctx)
-        7. audit_logger.log_qa_event(...) 1회 호출
-        8. finalizer event yield
+        현재 구현:
+        1. 사용자 질문을 state에 저장
+        2. question_classifier_agent 실행
+        3. 검색 결과 placeholder 저장
+        4. evidence_reviewer_agent 실행
+        5. consultation_finalizer_agent 실행
+        6. final answer를 state에 저장
 
-        현재는 안전을 위해 실제 root_agent에 연결하지 않습니다.
+        아직 구현하지 않은 것:
+        - 실제 Gemini Enterprise Search tool 호출
+        - audit_logger의 명시적 1회 호출
+        - agent.py root_agent 교체
         """
-        logger.info("[%s] JeonseOrchestrator skeleton called.", self.name)
+        tag = self._log_ctx(ctx)
+        user_question = self._get_last_user_message(ctx)
 
-        raise NotImplementedError(
-            "JeonseOrchestrator is a skeleton and is not wired as root_agent yet."
-        )
+        logger.info("%s ── JeonseOrchestrator turn 시작 ──", tag)
+        logger.info("%s 사용자 질문: %r", tag, user_question[:200])
 
-        # 이 yield는 type checker와 async generator 형태 유지를 위한 unreachable code입니다.
-        # 실제 실행되지 않습니다.
-        if False:
-            yield Event(author=self.name)
+        # 현재 turn에서 공유할 기본 state 초기화
+        ctx.session.state[USER_QUESTION] = user_question
+        ctx.session.state[AUDIT_LOG_WRITTEN] = False
+
+        # 1. 질문 분류 sub-agent 실행
+        logger.info("%s [1/4] question_classifier_agent 호출", tag)
+        async for event in self.question_classifier_agent.run_async(ctx):
+            # classifier의 중간 JSON/텍스트가 사용자에게 그대로 노출되지 않도록 content를 비웁니다.
+            self._suppress_event_content(event)
+            yield event
+
+        classification = self._read_state_json(ctx, QUESTION_CLASSIFICATION, default={})
+        logger.info("%s [1/4] 질문 분류 결과: %s", tag, classification)
+
+        # 2. 검색 단계 placeholder
+        #
+        # 현재 search_regulation_documents는 agent.py 내부에 있으므로,
+        # 여기서 바로 import하면 구조가 꼬일 수 있습니다.
+        # 다음 단계에서 search tool을 별도 모듈로 분리한 뒤 실제 검색을 연결합니다.
+        if SEARCH_RESULTS not in ctx.session.state:
+            ctx.session.state[SEARCH_RESULTS] = {
+                "status": "not_executed_yet",
+                "reason": (
+                    "search_regulation_documents는 아직 orchestrator에 연결하지 않았습니다. "
+                    "다음 단계에서 search tool을 별도 모듈로 분리한 뒤 연결합니다."
+                ),
+                "results": [],
+            }
+
+        ctx.session.state[SEARCH_METADATA] = {
+            "search_connected": False,
+            "search_step": "placeholder",
+        }
+
+        logger.info("%s [2/4] 검색 단계 placeholder 저장", tag)
+
+        # 3. 근거 검토 sub-agent 실행
+        logger.info("%s [3/4] evidence_reviewer_agent 호출", tag)
+        async for event in self.evidence_reviewer_agent.run_async(ctx):
+            # 근거 검토 중간 산출물은 사용자에게 바로 노출하지 않습니다.
+            self._suppress_event_content(event)
+            yield event
+
+        evidence_review = self._read_state_json(ctx, EVIDENCE_REVIEW, default={})
+        logger.info("%s [3/4] 근거 검토 결과: %s", tag, evidence_review)
+
+        # 4. 최종 상담 답변 sub-agent 실행
+        logger.info("%s [4/4] consultation_finalizer_agent 호출", tag)
+        async for event in self.consultation_finalizer_agent.run_async(ctx):
+            final_text = self._extract_event_text(event)
+            if final_text:
+                ctx.session.state[FINAL_ANSWER] = final_text
+            yield event
+
+        consultation_draft = self._read_state_json(ctx, CONSULTATION_DRAFT, default={})
+        logger.info("%s [4/4] 상담 초안 state: %s", tag, consultation_draft)
+        logger.info("%s ── JeonseOrchestrator turn 종료 ──", tag)
+
+    def _log_ctx(self, ctx: InvocationContext) -> str:
+        """로깅에 사용할 세션 컨텍스트 prefix를 생성합니다."""
+        session_id = getattr(ctx.session, "id", "") or "?"
+        user_id = getattr(ctx.session, "user_id", "") or "?"
+        return f"[session={session_id[:8]} user={str(user_id)[:20]}]"
+
+    def _get_last_user_message(self, ctx: InvocationContext) -> str:
+        """세션 이벤트에서 마지막 사용자 메시지 텍스트를 추출합니다."""
+        for event in reversed(ctx.session.events or []):
+            content = getattr(event, "content", None)
+            if not content:
+                continue
+
+            if getattr(content, "role", None) != "user":
+                continue
+
+            parts = getattr(content, "parts", None) or []
+            texts = []
+            for part in parts:
+                text = getattr(part, "text", None)
+                if text:
+                    texts.append(text)
+
+            if texts:
+                return "\n".join(texts).strip()
+
+        return ""
+
+    def _read_state_json(
+        self,
+        ctx: InvocationContext,
+        key: str,
+        default: Any,
+    ) -> Any:
+        """
+        session.state에서 값을 읽고, JSON 문자열이면 dict/list로 파싱합니다.
+
+        ADK output_key는 agent 응답을 state에 저장합니다.
+        output_schema를 쓰더라도 환경/버전에 따라 문자열 JSON 형태로 들어올 수 있으므로
+        안전하게 처리합니다.
+        """
+        raw = ctx.session.state.get(key, default)
+
+        if raw is None:
+            return default
+
+        if isinstance(raw, (dict, list)):
+            return raw
+
+        if isinstance(raw, str):
+            stripped = raw.strip()
+            if not stripped:
+                return default
+
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return raw
+
+        return raw
+
+    def _suppress_event_content(self, event: Event) -> None:
+        """
+        classifier/reviewer 같은 중간 sub-agent 응답이 사용자에게 그대로 보이지 않도록 합니다.
+
+        Dooray 예시 프로젝트와 같은 패턴입니다.
+        event는 yield하되 content.parts를 비워 ADK 내부 state/action 처리는 유지하고,
+        사용자 화면에는 중간 JSON이 노출되지 않게 합니다.
+        """
+        content = getattr(event, "content", None)
+        if not content:
+            return
+
+        parts = getattr(content, "parts", None)
+        if parts:
+            content.parts = []
+
+    def _extract_event_text(self, event: Event) -> str:
+        """Event content에서 텍스트를 추출합니다."""
+        content = getattr(event, "content", None)
+        if not content:
+            return ""
+
+        parts = getattr(content, "parts", None) or []
+        texts = []
+
+        for part in parts:
+            text = getattr(part, "text", None)
+            if text:
+                texts.append(text)
+
+        return "\n".join(texts).strip()
