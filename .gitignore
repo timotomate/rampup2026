@@ -2,3 +2,6 @@
 *.pdf
 jeonse_agent_architecture_audit_deck.pptx
 jeonse_agent_gcp_icon_architecture_v3.pptx
+*.pyc
+__pycache__
+/__pycache__
