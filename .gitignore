@@ -5,3 +5,17 @@ jeonse_agent_gcp_icon_architecture_v3.pptx
 *.pyc
 __pycache__
 /__pycache__
+# Python cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Local ADK runtime/session state
+.adk/
+**/.adk/
+*.db
+
+# Local environment
+.env
+.venv/
