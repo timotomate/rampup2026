@@ -30,6 +30,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 
 from .search_tools import search_regulation_documents
+from .audit_logger import log_orchestrated_qa_event
 from .state_keys import (
     USER_QUESTION,
     QUESTION_CLASSIFICATION,
@@ -166,6 +167,22 @@ class JeonseOrchestrator(BaseAgent):
 
         final_answer = ctx.session.state.get(FINAL_ANSWER, "")
         logger.info("%s [4/4] 최종 답변 state preview: %r", tag, str(final_answer)[:500])
+
+        # 5. 오케스트레이터 경로의 BigQuery audit log 저장
+        #
+        # legacy_root_agent에서는 ADK callback으로 Q/A 로그를 저장했지만,
+        # JeonseOrchestrator는 BaseAgent 기반 custom agent이므로 마지막 단계에서 명시적으로 1회 저장합니다.
+        audit_written = log_orchestrated_qa_event(
+            question=ctx.session.state.get(USER_QUESTION, user_question),
+            answer=str(final_answer or ""),
+            state=ctx.session.state,
+            invocation_id=str(getattr(ctx, "invocation_id", "") or "unknown"),
+            user_id=str(getattr(ctx.session, "user_id", "") or "unknown"),
+            session_id=str(getattr(ctx.session, "id", "") or "unknown"),
+            agent_name=self.name,
+        )
+        logger.info("%s [5/5] BigQuery audit log written=%s", tag, audit_written)
+
         logger.info("%s ── JeonseOrchestrator turn 종료 ──", tag)
 
     def _build_search_query(
