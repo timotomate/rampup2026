@@ -29,6 +29,7 @@ from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 
+from .search_tools import search_regulation_documents
 from .state_keys import (
     USER_QUESTION,
     QUESTION_CLASSIFICATION,
@@ -127,27 +128,23 @@ class JeonseOrchestrator(BaseAgent):
         classification = self._read_state_json(ctx, QUESTION_CLASSIFICATION, default={})
         logger.info("%s [1/4] 질문 분류 결과: %s", tag, classification)
 
-        # 2. 검색 단계 placeholder
-        #
-        # 현재 search_regulation_documents는 agent.py 내부에 있으므로,
-        # 여기서 바로 import하면 구조가 꼬일 수 있습니다.
-        # 다음 단계에서 search tool을 별도 모듈로 분리한 뒤 실제 검색을 연결합니다.
-        if SEARCH_RESULTS not in ctx.session.state:
-            ctx.session.state[SEARCH_RESULTS] = {
-                "status": "not_executed_yet",
-                "reason": (
-                    "search_regulation_documents는 아직 orchestrator에 연결하지 않았습니다. "
-                    "다음 단계에서 search tool을 별도 모듈로 분리한 뒤 연결합니다."
-                ),
-                "results": [],
-            }
+        # 2. Gemini Enterprise Data Store 검색
+        search_query = self._build_search_query(
+            user_question=user_question,
+            classification=classification,
+        )
+        logger.info("%s [2/4] search_regulation_documents 호출 query=%r", tag, search_query[:300])
 
+        search_result = self._run_regulation_search(search_query)
+
+        ctx.session.state[SEARCH_RESULTS] = search_result
         ctx.session.state[SEARCH_METADATA] = {
-            "search_connected": False,
-            "search_step": "placeholder",
+            "search_connected": True,
+            "search_step": "search_regulation_documents",
+            "query": search_query,
         }
 
-        logger.info("%s [2/4] 검색 단계 placeholder 저장", tag)
+        logger.info("%s [2/4] 검색 결과 state 저장 완료", tag)
 
         # 3. 근거 검토 sub-agent 실행
         logger.info("%s [3/4] evidence_reviewer_agent 호출", tag)
@@ -170,6 +167,76 @@ class JeonseOrchestrator(BaseAgent):
         consultation_draft = self._read_state_json(ctx, CONSULTATION_DRAFT, default={})
         logger.info("%s [4/4] 상담 초안 state: %s", tag, consultation_draft)
         logger.info("%s ── JeonseOrchestrator turn 종료 ──", tag)
+
+    def _build_search_query(
+        self,
+        user_question: str,
+        classification: Any,
+    ) -> str:
+        """
+        질문분류 결과와 사용자 질문을 바탕으로 검색 query를 구성합니다.
+
+        현재 단계에서는 과도한 query rewriting을 하지 않습니다.
+        이유:
+        - 기존 root_agent에서 잘 동작하던 검색 흐름을 최대한 유지하기 위해서입니다.
+        - classification이 dict 형태이면 search_focus_terms/entities 정도만 보강합니다.
+        """
+        terms = []
+
+        if isinstance(classification, dict):
+            search_focus_terms = classification.get("search_focus_terms") or []
+            if isinstance(search_focus_terms, list):
+                terms.extend(str(term) for term in search_focus_terms if term)
+
+            entities = classification.get("entities") or {}
+            if isinstance(entities, dict):
+                for value in entities.values():
+                    if isinstance(value, (str, int, float)) and value:
+                        terms.append(str(value))
+                    elif isinstance(value, list):
+                        terms.extend(str(item) for item in value if item)
+
+        # 중복 제거: 순서 유지
+        deduped_terms = []
+        seen = set()
+        for term in terms:
+            cleaned = str(term).strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            deduped_terms.append(cleaned)
+
+        if deduped_terms:
+            return f"{user_question}\n\n검색 보강 키워드: {' '.join(deduped_terms[:12])}".strip()
+
+        return user_question.strip()
+
+    def _run_regulation_search(
+        self,
+        query: str,
+    ) -> Any:
+        """
+        Gemini Enterprise Data Store 검색 Tool을 실행합니다.
+
+        search_regulation_documents는 기존 root_agent에서도 사용하는 동일 Tool입니다.
+        여기서는 향후 JeonseOrchestrator가 같은 Tool을 재사용할 수 있도록 연결합니다.
+        """
+        if not query:
+            return {
+                "status": "skipped",
+                "reason": "empty query",
+                "results": [],
+            }
+
+        try:
+            return search_regulation_documents(query)
+        except Exception as exc:
+            logger.exception("search_regulation_documents failed in orchestrator")
+            return {
+                "status": "error",
+                "error": str(exc),
+                "results": [],
+            }
 
     def _log_ctx(self, ctx: InvocationContext) -> str:
         """로깅에 사용할 세션 컨텍스트 prefix를 생성합니다."""
