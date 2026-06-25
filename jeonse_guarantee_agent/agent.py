@@ -1,3 +1,4 @@
+import os
 import re
 
 from google.adk.agents import Agent
@@ -490,7 +491,7 @@ def resolve_policy_conflict(search_results: dict) -> dict:
     }
 
 
-root_agent = Agent(
+legacy_root_agent = Agent(
     name="jeonse_guarantee_agent",
     model="gemini-2.5-flash",
     description="전세보증 상담원, 행원을 보조하는 ADK 기반 Agent입니다.",
@@ -502,3 +503,31 @@ root_agent = Agent(
         search_regulation_documents,
     ],
 )
+
+def _env_flag(name: str, default: str = "FALSE") -> bool:
+    """
+    환경변수 기반 feature flag helper.
+
+    TRUE/1/YES/Y/ON이면 True로 처리합니다.
+    그 외 값은 False로 처리합니다.
+    """
+    return os.getenv(name, default).strip().upper() in {
+        "TRUE",
+        "1",
+        "YES",
+        "Y",
+        "ON",
+    }
+
+
+if _env_flag("USE_ORCHESTRATOR_AGENT", "FALSE"):
+    # 실험용 오케스트레이터 root_agent.
+    # 기본값은 FALSE이므로, 명시적으로 켰을 때만 이 경로를 사용합니다.
+    from .orchestrator_factory import build_jeonse_orchestrator_candidate
+
+    root_agent = build_jeonse_orchestrator_candidate()
+else:
+    # 안정화된 기존 root_agent.
+    # Gemini Enterprise / ADK Web 기본 테스트는 이 경로를 사용합니다.
+    root_agent = legacy_root_agent
+
