@@ -28,6 +28,7 @@ from typing import Any, AsyncGenerator, Optional
 from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
+from google.genai import types
 
 from .search_tools import search_regulation_documents
 from .audit_logger import log_orchestrated_qa_event
@@ -164,9 +165,13 @@ class JeonseOrchestrator(BaseAgent):
             if final_text:
                 guarded_text = self._apply_identity_guard(final_text)
                 if guarded_text != final_text:
-                    self._replace_event_text(event, guarded_text)
                     logger.warning("%s [4/4] identity guard sanitized final answer", tag)
                 ctx.session.state[FINAL_ANSWER] = guarded_text
+
+            # Agent Runtime Playground에서는 sub-agent의 final event가 화면에 잠깐 보였다가
+            # 사라지는 현상이 있을 수 있으므로, finalizer event는 사용자 화면에 직접 노출하지 않습니다.
+            # 최종 응답은 아래에서 root orchestrator author로 새 Event를 만들어 1회만 yield합니다.
+            self._suppress_event_content(event)
             yield event
 
         final_answer = ctx.session.state.get(FINAL_ANSWER, "")
@@ -186,6 +191,17 @@ class JeonseOrchestrator(BaseAgent):
             agent_name=self.name,
         )
         logger.info("%s [5/5] BigQuery audit log written=%s", tag, audit_written)
+
+        final_answer_for_user = str(ctx.session.state.get(FINAL_ANSWER, final_answer) or "").strip()
+        if final_answer_for_user:
+            logger.info("%s [5/5] root final response event yield", tag)
+            yield Event(
+                author=self.name,
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part(text=final_answer_for_user)],
+                ),
+            )
 
         logger.info("%s ── JeonseOrchestrator turn 종료 ──", tag)
 
