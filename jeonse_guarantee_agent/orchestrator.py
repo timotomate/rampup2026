@@ -160,19 +160,23 @@ class JeonseOrchestrator(BaseAgent):
 
         # 4. 최종 상담 답변 sub-agent 실행
         logger.info("%s [4/4] consultation_finalizer_agent 호출", tag)
+        finalizer_events = []
+
         async for event in self.consultation_finalizer_agent.run_async(ctx):
             final_text = self._extract_event_text(event)
             if final_text:
                 guarded_text = self._apply_identity_guard(final_text)
                 if guarded_text != final_text:
+                    self._replace_event_text(event, guarded_text)
                     logger.warning("%s [4/4] identity guard sanitized final answer", tag)
                 ctx.session.state[FINAL_ANSWER] = guarded_text
 
-            # Agent Runtime Playground에서는 sub-agent의 final event가 화면에 잠깐 보였다가
-            # 사라지는 현상이 있을 수 있으므로, finalizer event는 사용자 화면에 직접 노출하지 않습니다.
-            # 최종 응답은 아래에서 root orchestrator author로 새 Event를 만들어 1회만 yield합니다.
-            self._suppress_event_content(event)
-            yield event
+            # 중요:
+            # Agent Runtime Playground에서 답변이 잠깐 보였다가 사라지는 현상을 막기 위해,
+            # finalizer의 표준 LlmAgent Event를 즉시 yield하지 않습니다.
+            # 먼저 BigQuery audit logging까지 끝낸 뒤,
+            # finalizer가 만든 표준 Event를 마지막에 yield합니다.
+            finalizer_events.append(event)
 
         final_answer = ctx.session.state.get(FINAL_ANSWER, "")
         logger.info("%s [4/4] 최종 답변 state preview: %r", tag, str(final_answer)[:500])
@@ -193,8 +197,14 @@ class JeonseOrchestrator(BaseAgent):
         logger.info("%s [5/5] BigQuery audit log written=%s", tag, audit_written)
 
         final_answer_for_user = str(ctx.session.state.get(FINAL_ANSWER, final_answer) or "").strip()
-        if final_answer_for_user:
-            logger.info("%s [5/5] root final response event yield", tag)
+
+        if finalizer_events:
+            logger.info("%s [5/5] finalizer response event yield after audit logging", tag)
+            for event in finalizer_events:
+                yield event
+        elif final_answer_for_user:
+            # 방어적 fallback: 정상 상황에서는 finalizer_events가 존재해야 합니다.
+            logger.warning("%s [5/5] no finalizer event; yielding fallback root final response", tag)
             yield Event(
                 author=self.name,
                 content=types.Content(
