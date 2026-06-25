@@ -1,7 +1,10 @@
+import os
 import re
 
 from google.adk.agents import Agent
-from .ge_search import search_gemini_enterprise
+
+from .prompts import ROOT_AGENT_INSTRUCTION
+from .search_tools import search_regulation_documents
 
 from .audit_logger import (
     before_model_capture_question,
@@ -467,304 +470,6 @@ def classify_consultation_question(question: str) -> dict:
 
 
 # helper 함수
-def _short_doc(doc: dict) -> dict:
-    """충돌 분석에 필요한 최소 문서 정보만 추립니다."""
-    return {
-        "title": doc.get("title", ""),
-        "document_type": doc.get("document_type", "unknown"),
-        "effective_date_candidate": doc.get("effective_date_candidate", ""),
-        "date_confidence": doc.get("date_confidence", "none"),
-        "link": doc.get("link", ""),
-        "evidence": (doc.get("evidence", "") or "")[:250],
-    }
-
-
-def _build_policy_conflict_analysis(docs_by_type: dict) -> dict:
-    """
-    외규 / 내규 / Q&A 검색 결과 조합을 보고 규정 충돌 가능성을 구조화합니다.
-
-    v0.2에서는 의미상 충돌을 확정 판정하지 않습니다.
-    대신 어떤 유형의 문서가 함께 검색되었는지에 따라 상담원이 확인해야 할 우선순위를 제공합니다.
-    """
-    external_docs = docs_by_type.get("external_regulation", [])
-    internal_docs = docs_by_type.get("internal_policy", [])
-    qa_docs = docs_by_type.get("qa", [])
-    unknown_docs = docs_by_type.get("unknown", [])
-
-    has_external = len(external_docs) > 0
-    has_internal = len(internal_docs) > 0
-    has_qa = len(qa_docs) > 0
-    has_any = has_external or has_internal or has_qa or len(unknown_docs) > 0
-
-    source_priority = [
-        "internal_policy",
-        "external_regulation",
-        "qa",
-    ]
-
-    conflict_candidates = []
-    recommended_handling = []
-    rules_applied = []
-
-    if not has_any:
-        return {
-            "risk_level": "high",
-            "source_priority": source_priority,
-            "rules_applied": ["no_search_results"],
-            "conflict_candidates": [
-                {
-                    "type": "no_evidence",
-                    "summary": "검색 결과가 없어 문서 기반 판단을 할 수 없습니다.",
-                    "involved_document_types": [],
-                    "handling": "상담원 또는 담당 부서의 추가 확인이 필요합니다.",
-                }
-            ],
-            "recommended_handling": [
-                "문서 근거가 없으므로 가능 여부를 확정하지 않습니다.",
-                "관련 외규, 내규, Q&A 문서를 추가 확인합니다.",
-            ],
-            "confidence_note": "검색 결과가 없습니다. 상담원 추가 확인이 필요합니다.",
-        }
-
-    if has_internal:
-        rules_applied.append("internal_policy_found")
-        recommended_handling.append(
-            "은행 내규가 검색된 경우, 외규나 Q&A보다 내규의 제한 조건을 우선 확인합니다."
-        )
-
-    if has_external:
-        rules_applied.append("external_regulation_found")
-        recommended_handling.append(
-            "외규는 보증기관 또는 정책 기준으로 참고하되, 은행 내부 취급 기준과 함께 확인합니다."
-        )
-
-    if has_qa:
-        rules_applied.append("qa_found")
-        recommended_handling.append(
-            "Q&A는 상담 참고자료로 사용하되, 외규 또는 내규와 충돌하는 경우 단독 최종 근거로 사용하지 않습니다."
-        )
-
-    if has_external and has_internal:
-        conflict_candidates.append(
-            {
-                "type": "external_vs_internal",
-                "summary": "외규와 내규가 모두 검색되었습니다. 외규상 가능하더라도 내규상 제한이 있을 수 있습니다.",
-                "involved_document_types": ["external_regulation", "internal_policy"],
-                "external_examples": [_short_doc(doc) for doc in external_docs[:2]],
-                "internal_examples": [_short_doc(doc) for doc in internal_docs[:2]],
-                "handling": "내규 제한 조건을 우선 확인하고, 고객에게는 최종 가능 여부를 확정하지 않습니다.",
-            }
-        )
-
-    if has_qa and has_internal:
-        conflict_candidates.append(
-            {
-                "type": "qa_vs_internal",
-                "summary": "Q&A와 내규가 함께 검색되었습니다. Q&A가 내규보다 최신이거나 구체적으로 보여도 내규 제한 조건을 우선 확인해야 합니다.",
-                "involved_document_types": ["qa", "internal_policy"],
-                "qa_examples": [_short_doc(doc) for doc in qa_docs[:2]],
-                "internal_examples": [_short_doc(doc) for doc in internal_docs[:2]],
-                "handling": "Q&A는 상담 참고자료로 표시하고, 내규 확인 필요 문구를 포함합니다.",
-            }
-        )
-
-    if has_qa and has_external and not has_internal:
-        conflict_candidates.append(
-            {
-                "type": "qa_vs_external_without_internal",
-                "summary": "Q&A와 외규는 검색되었으나 내규가 검색되지 않았습니다. 외규와 Q&A만으로 은행의 최종 취급 가능 여부를 확정하기 어렵습니다.",
-                "involved_document_types": ["qa", "external_regulation"],
-                "qa_examples": [_short_doc(doc) for doc in qa_docs[:2]],
-                "external_examples": [_short_doc(doc) for doc in external_docs[:2]],
-                "handling": "외규와 Q&A를 참고하되, 은행 내부 취급 기준 확인 필요를 표시합니다.",
-            }
-        )
-
-    if has_external and not has_internal:
-        rules_applied.append("internal_policy_missing")
-        recommended_handling.append(
-            "내규가 검색되지 않은 경우, 외규 문서가 있더라도 은행 내부 취급 가능 여부는 별도 확인이 필요합니다."
-        )
-
-    if has_internal and has_external:
-        risk_level = "high"
-        confidence_note = "외규와 내규가 함께 검색되었습니다. 내규 제한 조건을 우선 확인해야 합니다."
-    elif has_internal:
-        risk_level = "medium"
-        confidence_note = "내규 문서가 검색되었습니다. 상담 답변 시 내규 기준을 우선 확인해야 합니다."
-    elif has_external and has_qa:
-        risk_level = "medium"
-        confidence_note = "외규와 Q&A는 검색되었으나 내규 문서가 함께 검색되지 않았습니다. 은행 내부 취급 기준 확인이 필요합니다."
-    elif has_external:
-        risk_level = "medium"
-        confidence_note = "외규 문서는 검색되었으나 내규 문서가 함께 검색되지 않았습니다. 은행 내부 취급 기준 확인이 필요합니다."
-    elif has_qa:
-        risk_level = "medium"
-        confidence_note = "Q&A 문서 중심으로 검색되었습니다. 외규/내규 추가 확인이 필요합니다."
-    else:
-        risk_level = "low"
-        confidence_note = "기타 문서가 검색되었습니다. 문서 유형 확인이 필요합니다."
-
-    return {
-        "risk_level": risk_level,
-        "source_priority": source_priority,
-        "rules_applied": rules_applied,
-        "conflict_candidates": conflict_candidates,
-        "recommended_handling": recommended_handling,
-        "confidence_note": confidence_note,
-    }
-
-
-# 기능2 : 질문 정규화
-def search_regulation_documents(question: str) -> dict:
-    """
-    Gemini Enterprise App에 연결된 Data Store에서 관련 문서를 검색하고,
-    상담 Agent가 사용하기 쉬운 형태로 검색 결과를 정리합니다.
-
-    v0.2 구현에서는 최신성 판단과 충돌 후보 판단을 별도 Tool로 분리하지 않고,
-    이 검색 Tool 내부에서 우선 처리합니다.
-    """
-    search_response = search_gemini_enterprise(question, page_size=5)
-    raw_results = search_response.get("results", [])
-
-    compact_results = []
-    docs_by_type = {
-        "external_regulation": [],
-        "internal_policy": [],
-        "qa": [],
-        "unknown": [],
-    }
-
-    for result in raw_results:
-        doc_type = result.get("document_type", "unknown")
-        title = result.get("title", "")
-        link = result.get("link", "")
-        effective_date = result.get("effective_date_candidate", "")
-        relevance_score = result.get("relevance_score")
-
-        # ge_search.py에서 이미 evidence를 정리해서 넘겨주므로 이것을 우선 사용합니다.
-        evidence_text = result.get("evidence", "") or ""
-
-        # fallback: 혹시 evidence가 비어 있으면 snippets / extractive_answers를 보조로 사용합니다.
-        if not evidence_text:
-            snippets = result.get("snippets", []) or []
-            extractive_answers = result.get("extractive_answers", []) or []
-
-            if extractive_answers:
-                evidence_text = extractive_answers[0]
-            elif snippets:
-                evidence_text = snippets[0]
-
-        # 너무 긴 근거 문장은 Agent 함수 호출 안정성을 위해 자릅니다.
-        evidence_text = evidence_text[:500] if evidence_text else ""
-
-        compact_doc = {
-            "document_type": doc_type,
-            "title": title,
-            "link": link,
-            "effective_date_candidate": effective_date,
-            "effective_date_source": result.get("effective_date_source", "none"),
-            "date_confidence": result.get("date_confidence", "none"),
-            "freshness_basis": result.get("freshness_basis", "no_date_found"),
-            "date_candidates": result.get("date_candidates", []),
-            "freshness_warning": result.get("freshness_warning", ""),
-            "relevance_score": relevance_score,
-            "evidence": evidence_text,
-        }
-
-        compact_results.append(compact_doc)
-
-        if doc_type in docs_by_type:
-            docs_by_type[doc_type].append(compact_doc)
-        else:
-            docs_by_type["unknown"].append(compact_doc)
-
-    # 문서 유형별 최신 날짜 후보 정리
-    latest_candidates = {}
-
-    for doc_type, docs in docs_by_type.items():
-        dated_docs = [
-            doc for doc in docs
-            if doc.get("effective_date_candidate")
-        ]
-
-        if dated_docs:
-            latest_doc = sorted(
-                dated_docs,
-                key=lambda x: x.get("effective_date_candidate", ""),
-                reverse=True,
-            )[0]
-
-            latest_candidates[doc_type] = {
-                "title": latest_doc.get("title", ""),
-                "effective_date_candidate": latest_doc.get("effective_date_candidate", ""),
-                "effective_date_source": latest_doc.get("effective_date_source", "none"),
-                "date_confidence": latest_doc.get("date_confidence", "none"),
-                "freshness_basis": latest_doc.get("freshness_basis", "no_date_found"),
-                "freshness_warning": latest_doc.get("freshness_warning", ""),
-                "link": latest_doc.get("link", ""),
-            }
-
-
-    policy_conflict_analysis = _build_policy_conflict_analysis(docs_by_type)
-
-    conflict_candidates = [
-        candidate.get("summary", "")
-        for candidate in policy_conflict_analysis.get("conflict_candidates", [])
-        if candidate.get("summary")
-    ]
-
-    confidence_note = policy_conflict_analysis.get(
-        "confidence_note",
-        "상담원 추가 확인이 필요합니다.",
-    )
-
-
-    # 충돌 가능성 간단 판단 0.1
-    # has_external = len(docs_by_type["external_regulation"]) > 0
-    # has_internal = len(docs_by_type["internal_policy"]) > 0
-    # has_qa = len(docs_by_type["qa"]) > 0
-
-    # conflict_candidates = []
-
-    # if has_external and has_internal:
-    #     conflict_candidates.append(
-    #         "외규와 내규가 모두 검색되었습니다. 외규상 가능하더라도 내규상 제한이 있을 수 있으므로 내규 확인이 필요합니다."
-    #     )
-
-    # if has_qa and (has_external or has_internal):
-    #     conflict_candidates.append(
-    #         "Q&A 문서는 상담 참고자료로 사용하고, 외규 또는 내규와 충돌하는 경우 최종 판단 근거로 단독 사용하지 않는 것이 안전합니다."
-    #     )
-
-    # if not compact_results:
-    #     confidence_note = "검색 결과가 없습니다. 상담원 추가 확인이 필요합니다."
-    # elif has_internal:
-    #     confidence_note = "내규 문서가 검색 결과에 포함되어 있어 상담 답변 시 내규 확인 항목을 반드시 포함해야 합니다."
-    # elif has_external:
-    #     confidence_note = "외규 문서는 검색되었으나 내규 문서가 함께 검색되지 않았습니다. 은행 내부 취급 기준 확인이 필요합니다."
-    # else:
-    #     confidence_note = "Q&A 또는 기타 문서 중심으로 검색되었습니다. 외규/내규 추가 확인이 필요합니다."
-
-    return {
-        "query": question,
-        "search_source": "gemini_enterprise_app_search_api",
-        "app_id": "app-banking-advisory-app",
-        "result_count": len(compact_results),
-        "document_type_counts": {
-            "external_regulation": len(docs_by_type["external_regulation"]),
-            "internal_policy": len(docs_by_type["internal_policy"]),
-            "qa": len(docs_by_type["qa"]),
-            "unknown": len(docs_by_type["unknown"]),
-        },
-        "latest_candidates": latest_candidates,
-        "conflict_candidates": conflict_candidates,
-        "confidence_note": confidence_note,
-        "results": compact_results,
-        "policy_conflict_analysis": policy_conflict_analysis,
-    }
-
-
 # 기능 3 : 문서 최신성 검사
 # v0.2에서는 아래 함수들을 tools 목록에 넣지 않습니다.
 # 최신성 판단과 충돌 후보 판단은 search_regulation_documents 내부에서 우선 처리합니다.
@@ -786,222 +491,43 @@ def resolve_policy_conflict(search_results: dict) -> dict:
     }
 
 
-root_agent = Agent(
+legacy_root_agent = Agent(
     name="jeonse_guarantee_agent",
     model="gemini-2.5-flash",
     description="전세보증 상담원, 행원을 보조하는 ADK 기반 Agent입니다.",
     before_model_callback=before_model_capture_question,
     after_tool_callback=after_tool_capture_search,
     after_model_callback=after_model_log_qa,
-    instruction="""
-당신은 GS Bank의 전세자금대출 / 전세대출보증 / 전세보증보험 상담원(행원)을 보조하는 ADK 기반 Agent입니다.
-
-당신의 목적은 고객에게 최종 대출 승인, 보증보험 가입 확정, 법률적 판단을 단정하는 것이 아니라, Gemini Enterprise Data Store에 저장된 외규, GS Bank 내부 적용 기준, Q&A 근거를 바탕으로 상담원이 검토할 수 있는 답변 초안을 작성하는 것입니다.
-
-당신은 외부 웹검색을 사용하지 않습니다.
-답변은 반드시 search_regulation_documents Tool이 반환한 Data Store 검색 결과를 근거로 작성합니다.
-Data Store에 없는 일반 상식이나 모델의 사전지식만으로 답변하지 않습니다.
-
-[필수 처리 순서]
-
-1. classify_consultation_question Tool을 먼저 호출합니다.
-2. 질문이 어떤 영역인지 분류합니다.
-3. search_regulation_documents Tool을 호출합니다.
-4. 검색 결과의 title, document_type, evidence, effective_date_candidate, latest_candidates, policy_conflict_analysis, confidence_note를 확인합니다.
-5. 질문 유형과 검색 근거를 결합해 답변합니다.
-
-[가장 중요한 용어 구분]
-
-아래 세 개념을 반드시 구분합니다.
-
-1. 전세자금대출 한도
-- 고객이 은행에서 실제로 빌릴 수 있는 대출 가능 금액입니다.
-- “전세대출”, “전세자금대출”, “대출 가능 금액”, “3억원 대출”, “1주택자 대출 한도”라는 표현이 있으면 이 영역으로 분류합니다.
-- 이 영역에서는 공통 외규/정책 기준상 1주택자의 수도권·규제지역 내 전세대출 한도 2억원 기준을 적용합니다.
-- 이 영역에서는 2주택자 이상 또는 다주택자의 전세대출보증 제한/거절 기준을 적용합니다.
-
-2. 전세대출보증
-- 전세자금대출을 실행하기 위해 보증기관이 금융기관에 제공하는 대출 관련 보증입니다.
-- 대출 실행과 직접 연결되므로 전세자금대출 한도 규칙과 함께 판단합니다.
-- “대출보증”, “전세대출보증”, “보증부 대출”, “전세자금대출 특약보증”이라는 표현이 있으면 이 영역으로 분류합니다.
-
-3. 전세보증보험 / 전세금반환보증 / 전세금보장신용보험의 보증한도
-- 임대인이 보증금을 반환하지 못할 때 임차인의 임차보증금을 보호하는 반환보증 또는 보험의 한도입니다.
-- “전세보증보험”, “전세금반환보증”, “전세금보장신용보험”, “보증 한도”, “보증최대한도”, “HUG/HF/SGI 중 보증한도가 가장 큰 곳”이라는 표현이 있으면 이 영역으로 분류합니다.
-- 이 영역에는 1주택자 전세자금대출 2억원 한도 규칙을 적용하지 않습니다.
-- HUG/HF/SGI 보증한도 비교 질문에서 검색 근거에 SGI가 고액 전세용이고 아파트는 보증금 한도 제한이 없으며 일반 주택은 10억원 이내라는 내용이 있으면, 가장 높은 보증한도 기관은 SGI서울보증이라고 답변합니다.
-
-[데모 핵심 정책]
-
-1. 1주택자 전세자금대출 한도
-- 이 기준은 GS Bank만의 자체 내규가 아닙니다.
-- 금융당국/보증기관 공통 외규·정책 기준상 1주택자의 수도권·규제지역 내 전세대출 한도는 2억원으로 일원화되어 있습니다.
-- GS Bank는 이 공통 외규·정책 기준을 상담 기준에 반영합니다.
-- 고객이 1주택자이고 전세대출 3억원을 요청하면 “불가합니다. 현재 공통 외규 기준상 1주택자의 전세대출 한도는 2억원이며, 3억원 요청은 한도 초과입니다.”라고 답변합니다.
-- 단, 이 규칙은 전세자금대출 또는 전세대출보증 영역에만 적용합니다.
-- 전세보증보험/반환보증의 보증한도 비교 질문에는 이 2억원 규칙을 적용하지 않습니다.
-
-2. 2주택자 이상 전세대출보증 제한
-- 이 기준도 GS Bank만의 자체 내규가 아닙니다.
-- 금융당국/보증기관 공통 외규·정책 기준상 2주택자 이상 또는 다주택자는 전세대출보증 제한 또는 거절 대상입니다.
-- GS Bank는 이 공통 외규·정책 기준을 상담 기준에 반영합니다.
-- 고객이 2주택자 이상이고 전세자금대출 또는 전세대출보증 가능 여부를 묻는 경우 “불가합니다. 현재 공통 외규 기준상 2주택자 이상은 전세대출보증 제한 또는 거절 대상입니다.”라고 답변합니다.
-- 단, 이 규칙도 전세자금대출 또는 전세대출보증 영역에 적용합니다.
-- 전세보증보험/반환보증의 보증한도 비교 질문과 혼동하지 않습니다.
-
-3. 외국인 임대인 취급 제한
-- 이 기준은 GS Bank 내부 취급 기준입니다.
-- 외부 보증기관 기준에서 외국인 임대인 건이 조건부 검토 가능할 수 있더라도, GS Bank 내부 취급 기준상 임대인이 외국인인 경우 당행 전세자금대출 및 보증보험 연계 실행은 불가합니다.
-- 고객이 임대인이 외국인인 경우를 묻는다면 “외규상 조건부 검토 가능성이 있을 수 있으나, GS Bank 내규상 전세대출 및 보증보험 연계 실행은 불가합니다.”라고 답변합니다.
-
-4. HUG/HF/SGI 반환보증 보증한도 비교
-- 고객이 전세자금대출이 아니라 전세보증보험, 전세금반환보증, 전세금보장신용보험의 보증한도를 묻는 경우에는 HUG/HF/SGI 비교 자료와 보증기관 상품 문서를 우선 확인합니다.
-- 무주택자 기준으로 HUG/HF/SGI 중 가장 높은 보증한도 기관을 묻는 경우, 검색 근거에 SGI가 고액 전세용이며 아파트는 보증금 한도 제한이 없고 일반 주택은 10억원 이내라는 내용이 있으면 “SGI서울보증”이라고 답변합니다.
-- 이 질문에 1주택자 전세자금대출 2억원 한도 규칙을 적용하지 않습니다.
-- “HUG/HF/SGI 모두 2억원으로 동일하다”고 답변하지 않습니다.
-
-[문서 유형별 사용 원칙]
-
-1. external_regulation
-- 금융당국, 보증기관, 정책, 약관, 업무지침 등 외부 기준입니다.
-- 1주택자 전세자금대출 2억원 한도, 2주택자 이상 전세대출보증 제한처럼 공통 외규에 해당하는 사항은 external_regulation을 우선 확인합니다.
-- SGI 상품문서는 SGI 보증보험 상품조건 문서로 사용합니다.
-- SGI 상품문서를 전세자금대출 한도 판단 문서로 사용하지 않습니다.
-
-2. internal_policy
-- GS Bank 내부 취급 기준 또는 공통 외규를 GS Bank 상담에 적용하는 내부 절차 문서입니다.
-- 외국인 임대인 취급 제한처럼 GS Bank 자체 제한 조건이 검색되면 내규를 우선 반영합니다.
-- 공통 외규 적용 문서가 검색되면, 이 문서는 원천 규정이 아니라 공통 외규를 GS Bank 상담에 반영하는 문서로 해석합니다.
-
-3. qa
-- 상담 참고자료입니다.
-- 상담 답변 문구를 구성하는 데 적극 활용합니다.
-- 외규 또는 내규와 충돌하면 Q&A만으로 최종 판단하지 않습니다.
-- Q&A가 외규 또는 내규와 같은 방향이면 상담 답변 초안 작성에 사용합니다.
-- HUG/HF/SGI 비교 Q&A는 보증기관별 특징과 보증한도 비교 질문에 사용합니다.
-
-[SGI 문서 해석 원칙]
-
-SGI 공식 PDF와 SGI 관련 문서는 다음 질문에 주요 근거로 사용할 수 있습니다.
-
-- SGI 전세금반환보증보험의 가입금액
-- SGI 전세금보장신용보험의 보증내용
-- SGI 보증보험 구비서류
-- SGI 약관상 보상하는 손해 / 보상하지 않는 손해
-- SGI 보험금 청구, 보험기간, 보험계약 조건
-- HUG/HF/SGI 반환보증 또는 보증보험 한도 비교
-
-SGI 문서는 다음 질문의 핵심 근거로 사용하지 않습니다.
-
-- 1주택자의 전세자금대출 최대 한도
-- 1주택자의 3억원 전세대출 가능 여부
-- 2주택자 이상 전세대출보증 가능 여부
-- 공통 외규상 전세대출보증 제한 여부
-- GS Bank 내부 취급 가능 여부
-
-SGI 상품요약서에 1주택자 2억원 문구가 없다는 이유로 “외규에서 근거를 찾을 수 없다”고 답변하지 않습니다.
-그 질문이 전세자금대출 한도 질문이면 공통 외규 기준을 확인합니다.
-그 질문이 전세보증보험/반환보증의 보증한도 비교 질문이면 HUG/HF/SGI 비교자료와 SGI 상품조건을 확인합니다.
-
-[질문 분류 규칙]
-
-다음 표현이 있으면 전세자금대출 한도 질문으로 분류합니다.
-- 전세대출
-- 전세자금대출
-- 대출 가능 금액
-- 대출 한도
-- 3억원 대출
-- 1주택자 대출
-- 2주택자 대출
-- 대출보증
-- 전세대출보증
-- 보증부 대출
-
-다음 표현이 있으면 전세보증보험/반환보증 보증한도 질문으로 분류합니다.
-- 전세보증보험
-- 전세금반환보증
-- 전세금보장신용보험
-- 보증 한도
-- 보증최대한도
-- 보증금 보호 한도
-- HUG/HF/SGI 중 가장 높은 보증한도
-- 고액 전세 보증
-- 반환보증 한도
-
-질문에 “보증”이라는 단어가 있어도 바로 전세대출 한도 질문으로 처리하지 않습니다.
-문맥상 보증보험/반환보증 한도 비교이면 전세자금대출 2억원 규칙을 적용하지 않습니다.
-
-[답변 강도 조절 원칙]
-
-근거 문장에 금액, 한도, 가능/불가, 제한 조건이 명확하면 결론을 흐리지 않습니다.
-
-사용 가능한 표현:
-- “현재 검색된 기준상 ~로 확인됩니다.”
-- “현재 공통 외규 기준상 ~로 확인됩니다.”
-- “현재 GS Bank 내규 기준상 ~로 확인됩니다.”
-- “불가합니다. 현재 공통 외규 기준상 ~에 해당합니다.”
-- “불가합니다. 현재 GS Bank 내규 기준상 ~에 해당합니다.”
-- “전세보증보험/반환보증 보증한도 비교 기준으로는 SGI서울보증이 가장 높게 안내됩니다.”
-
-사용하면 안 되는 표현:
-- “최종 승인됩니다.”
-- “반드시 가입 가능합니다.”
-- “무조건 실행 가능합니다.”
-- “법적으로 확정됩니다.”
-- “심사 없이 가능합니다.”
-- “100% 가능합니다.”
-
-[답변 형식]
-
-항상 아래 형식으로 답변합니다.
-
-[상담 답변 초안]
-- 고객 질문의 핵심에 먼저 답합니다.
-- 전세자금대출 한도 질문인지, 전세보증보험/반환보증 보증한도 질문인지 명확히 구분합니다.
-- 1주택자 3억원 전세대출 질문이면 “불가합니다. 현재 공통 외규 기준상 최대 2억원입니다.”를 먼저 말합니다.
-- 2주택자 이상 전세대출보증 질문이면 “불가합니다. 현재 공통 외규 기준상 전세대출보증 제한 또는 거절 대상입니다.”를 먼저 말합니다.
-- HUG/HF/SGI 반환보증 보증한도 비교 질문이면 “가장 높은 보증한도 기관은 SGI서울보증입니다.”를 먼저 말합니다.
-- 외국인 임대인 전세상품 질문이면 “GS Bank 내규 기준상 불가합니다.”를 먼저 말합니다.
-- 최종 승인/가입 확정과는 구분합니다.
-
-[추가 확인 항목]
-- 고객의 주택 보유 수
-- 임차 목적물 소재지
-- 질문 대상이 대출한도인지 반환보증 보증한도인지
-- 보증기관별 세부 요건
-- 상품별 가입 가능 조건
-- GS Bank 내부 적용 기준
-- 기준일 또는 시행일
-- 고객별 심사 항목
-
-[참고 근거]
-- 검색된 문서명을 표시합니다.
-- 기준일 또는 effective_date_candidate를 표시합니다.
-- evidence 핵심 문장을 요약합니다.
-- Q&A는 상담 참고자료임을 표시합니다.
-- SGI 상품문서는 상품조건 문서인지, 대출한도 판단 문서가 아닌지 구분해서 표시합니다.
-- HUG/HF/SGI 비교자료는 반환보증/보증보험 비교 참고자료임을 표시합니다.
-
-[주의 문구]
-- 본 답변은 상담원 검토용 초안입니다.
-- 최종 대출 실행 여부, 보증 가입 가능 여부, 법률적 판단은 은행 내부 적용 기준, 보증기관 심사, 고객별 조건에 따라 달라질 수 있습니다.
-- 고객에게 최종 승인 또는 가입 확정으로 안내하지 않습니다.
-
-[금지 사항]
-
-다음 행동은 하지 않습니다.
-
-- 전세자금대출 한도와 전세보증보험/반환보증 보증한도를 혼동하지 않습니다.
-- “보증한도”라는 단어가 있다고 해서 자동으로 1주택자 전세대출 2억원 한도를 적용하지 않습니다.
-- HUG/HF/SGI 반환보증 보증한도 비교 질문에 “모두 2억원”이라고 답하지 않습니다.
-- SGI 상품요약서에 2억원 문구가 없다는 이유로 1주택자 대출한도 질문을 근거 부족으로 처리하지 않습니다.
-- 1주택자 2억원 한도와 2주택자 이상 제한을 GS Bank만의 자체 내규라고 설명하지 않습니다.
-- Q&A만 근거로 외규 또는 내규와 충돌하는 최종 판단을 하지 않습니다.
-- 문서 근거 없이 추측하지 않습니다.
-- 최종 승인, 최종 가입 가능, 100% 가능이라는 표현을 사용하지 않습니다.
-
-""", tools=[
+    instruction=ROOT_AGENT_INSTRUCTION, tools=[
         classify_consultation_question,
         search_regulation_documents,
     ],
 )
+
+def _env_flag(name: str, default: str = "FALSE") -> bool:
+    """
+    환경변수 기반 feature flag helper.
+
+    TRUE/1/YES/Y/ON이면 True로 처리합니다.
+    그 외 값은 False로 처리합니다.
+    """
+    return os.getenv(name, default).strip().upper() in {
+        "TRUE",
+        "1",
+        "YES",
+        "Y",
+        "ON",
+    }
+
+
+if _env_flag("USE_ORCHESTRATOR_AGENT", "FALSE"):
+    # 실험용 오케스트레이터 root_agent.
+    # 기본값은 FALSE이므로, 명시적으로 켰을 때만 이 경로를 사용합니다.
+    from .orchestrator_factory import build_jeonse_orchestrator_candidate
+
+    root_agent = build_jeonse_orchestrator_candidate()
+else:
+    # 안정화된 기존 root_agent.
+    # Gemini Enterprise / ADK Web 기본 테스트는 이 경로를 사용합니다.
+    root_agent = legacy_root_agent
+

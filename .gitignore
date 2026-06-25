@@ -2,3 +2,24 @@
 *.pdf
 jeonse_agent_architecture_audit_deck.pptx
 jeonse_agent_gcp_icon_architecture_v3.pptx
+*.pyc
+__pycache__
+/__pycache__
+# Python cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Local ADK runtime/session state
+.adk/
+**/.adk/
+*.db
+
+# Local environment
+.venv/
+
+# Local env files
+.env
+**/.env
+*.env.local

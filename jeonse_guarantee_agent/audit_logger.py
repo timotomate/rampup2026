@@ -180,6 +180,42 @@ def _extract_response_text(llm_response: Any) -> str:
     return _extract_text_from_content(content)
 
 
+def _final_answer_filter_enabled() -> bool:
+    """중간 sub-agent 응답이 BigQuery에 저장되지 않도록 최종 답변 필터를 켭니다."""
+    return os.getenv("QA_LOG_ONLY_FINAL_ANSWER", "TRUE").upper() not in {
+        "FALSE",
+        "0",
+        "NO",
+        "N",
+    }
+
+
+def _looks_like_final_consultation_answer(answer: str) -> bool:
+    """
+    BigQuery audit log에 저장할 '최종 상담 답변'인지 판별합니다.
+
+    multi-agent 구조로 전환되면 classifier/reviewer/finalizer 등 여러 LLM 응답이 생길 수 있습니다.
+    이 함수는 질문분류/근거검토 같은 중간 산출물이 BigQuery Q/A 로그에 저장되는 것을 막기 위한 안전장치입니다.
+
+    현재 전세보증 상담 Agent의 최종 답변 포맷:
+    - [상담 답변 초안]
+    - [추가 확인 항목]
+    - [참고 근거]
+    - [주의 문구]
+    """
+    if not answer:
+        return False
+
+    normalized = answer.strip()
+
+    required_headers = [
+        "[상담 답변 초안]",
+        "[주의 문구]",
+    ]
+
+    return all(header in normalized for header in required_headers)
+
+
 def _detected_label(replacement: Any) -> str:
     if callable(replacement):
         # callable은 주민번호/전화번호처럼 부분 마스킹을 위한 규칙입니다.
@@ -346,7 +382,12 @@ def after_model_log_qa(callback_context: Any, llm_response: Any) -> None:
     if not answer:
         return None
 
-    # 상담 답변 초안 형식이거나, 일반 답변이라도 text final response로 보이면 로그 대상으로 봅니다.
+    # multi-agent 구조에서는 classifier/reviewer 등 중간 LLM 응답도 after_model_callback 대상이 될 수 있습니다.
+    # 따라서 기본적으로 최종 상담 답변 포맷을 가진 응답만 BigQuery Q/A audit log에 저장합니다.
+    if _final_answer_filter_enabled() and not _looks_like_final_consultation_answer(answer):
+        print("[qa-audit-log] skipped non-final model response")
+        return None
+
     question = _get_state_value(callback_context.state, "qa_current_question", "")
     if not question:
         return None
@@ -399,3 +440,177 @@ def after_model_log_qa(callback_context: Any, llm_response: Any) -> None:
         print(f"[qa-audit-log] failed to insert BigQuery row: {type(exc).__name__}: {exc}")
 
     return None
+
+def _parse_json_if_possible(value: Any) -> Any:
+    """문자열 JSON이면 dict/list로 변환하고, 아니면 원래 값을 반환합니다."""
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped:
+        return value
+    try:
+        return json.loads(stripped)
+    except Exception:
+        return value
+
+
+def _extract_source_documents_from_orchestrator_state(state: Any) -> List[Dict[str, Any]]:
+    """
+    JeonseOrchestrator가 state에 저장한 검색 결과에서 BigQuery용 source_documents를 추출합니다.
+    """
+    existing_docs = _get_state_value(state, "qa_source_documents", [])
+    if isinstance(existing_docs, list) and existing_docs:
+        return existing_docs[:5]
+
+    search_results = _get_state_value(state, "jeonse_search_results", {})
+    search_results = _parse_json_if_possible(search_results)
+
+    if isinstance(search_results, dict):
+        result_value = search_results.get("result", search_results)
+    else:
+        result_value = search_results
+
+    result_value = _parse_json_if_possible(result_value)
+
+    docs: List[Dict[str, Any]] = []
+
+    if isinstance(result_value, dict):
+        items = result_value.get("results", [])
+    elif isinstance(result_value, list):
+        items = result_value
+    else:
+        items = []
+
+    for item in items[:5]:
+        if not isinstance(item, dict):
+            continue
+        docs.append(
+            {
+                "title": item.get("title", ""),
+                "document_type": item.get("document_type", ""),
+                "effective_date_candidate": item.get("effective_date_candidate", ""),
+                "evidence": (item.get("evidence", "") or "")[:300],
+            }
+        )
+
+    return docs
+
+
+def _extract_tool_called_from_orchestrator_state(state: Any) -> List[str]:
+    """
+    JeonseOrchestrator 경로에서는 search_regulation_documents가 ADK Tool callback으로 호출되지 않을 수 있습니다.
+    따라서 search metadata를 보고 tool_called 값을 보강합니다.
+    """
+    existing_tools = _get_state_value(state, "qa_tool_called", [])
+    if isinstance(existing_tools, list) and existing_tools:
+        return existing_tools[-20:]
+
+    search_metadata = _get_state_value(state, "jeonse_search_metadata", {})
+    search_metadata = _parse_json_if_possible(search_metadata)
+
+    if isinstance(search_metadata, dict):
+        if search_metadata.get("search_connected") or search_metadata.get("search_step") == "search_regulation_documents":
+            return ["search_regulation_documents"]
+
+    return []
+
+
+def log_orchestrated_qa_event(
+    *,
+    question: str,
+    answer: str,
+    state: Any,
+    invocation_id: str,
+    user_id: str = "unknown",
+    session_id: str = "unknown",
+    agent_name: str = "jeonse_orchestrator",
+) -> bool:
+    """
+    JeonseOrchestrator에서 최종 Q/A를 BigQuery에 명시적으로 1회 저장합니다.
+
+    이 함수가 필요한 이유:
+    - legacy_root_agent의 ADK callbacks는 TRUE 모드의 JeonseOrchestrator에는 적용되지 않을 수 있습니다.
+    - multi-agent 구조에서는 callback이 중간 sub-agent마다 여러 번 실행될 수 있으므로,
+      오케스트레이터 마지막에서 최종 답변만 1회 저장하는 방식이 더 안전합니다.
+    """
+    if not _enabled():
+        print("[qa-audit-log] skipped orchestrated log because QA_LOGGING_ENABLED is false")
+        return False
+
+    question = (question or "").strip()
+    answer = (answer or "").strip()
+
+    if not question:
+        print("[qa-audit-log] skipped orchestrated log because question is empty")
+        return False
+
+    if not answer:
+        print("[qa-audit-log] skipped orchestrated log because answer is empty")
+        return False
+
+    if _get_state_value(state, "jeonse_audit_log_written", False):
+        print("[qa-audit-log] skipped orchestrated log because it was already written")
+        return False
+
+    # 기존 최종 답변 필터가 있으면 재사용합니다.
+    final_filter = globals().get("_looks_like_final_consultation_answer")
+    if callable(final_filter) and not final_filter(answer):
+        print("[qa-audit-log] skipped orchestrated non-final answer")
+        return False
+
+    if not invocation_id or invocation_id == "unknown":
+        invocation_id = f"orchestrator-{session_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+
+    source_documents = _extract_source_documents_from_orchestrator_state(state)
+    tool_called = _extract_tool_called_from_orchestrator_state(state)
+
+    # callback 경로와 동일한 state key도 보강해 둡니다.
+    _set_state(state, "qa_current_question", question)
+    _set_state(state, "qa_tool_called", tool_called)
+    _set_state(state, "qa_source_documents", source_documents)
+
+    question_masked, q_types, q_masking_mode = mask_text(question)
+    answer_masked, a_types, a_masking_mode = mask_text(answer)
+
+    row = {
+        "event_time": datetime.now(timezone.utc).isoformat(),
+        "invocation_id": str(invocation_id),
+        "user_id": str(user_id or "unknown"),
+        "session_id": str(session_id or "unknown"),
+        "agent_name": str(agent_name or "jeonse_orchestrator"),
+        "question_masked": question_masked,
+        "answer_masked": answer_masked,
+        "question_sha256": _sha256(question),
+        "answer_sha256": _sha256(answer),
+        "pii_detected_types": _safe_json(sorted(set(q_types + a_types)), max_len=5000),
+        "tool_called": _safe_json(tool_called, max_len=5000),
+        "source_documents": _safe_json(source_documents, max_len=20000),
+        "masking_mode": f"question={q_masking_mode};answer={a_masking_mode}",
+        "runtime": "adk_orchestrator",
+        "feedback": None,
+        "feedback_reason": None,
+    }
+
+    try:
+        from google.cloud import bigquery
+
+        client = bigquery.Client(project=PROJECT_ID)
+        errors = client.insert_rows_json(
+            FULL_TABLE_ID,
+            [row],
+            row_ids=[str(invocation_id)],
+        )
+
+        if errors:
+            print(f"[qa-audit-log] BigQuery insert errors: {errors}")
+            return False
+
+        _set_state(state, "jeonse_audit_log_written", True)
+        print(f"[qa-audit-log] inserted orchestrated row into {FULL_TABLE_ID}, invocation_id={invocation_id}")
+        return True
+
+    except Exception as exc:
+        # 로그 저장 실패 때문에 상담 Agent 답변 자체가 실패하지 않도록 삼킵니다.
+        print(f"[qa-audit-log] failed to insert orchestrated BigQuery row: {type(exc).__name__}: {exc}")
+        return False
+
