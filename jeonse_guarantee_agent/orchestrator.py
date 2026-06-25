@@ -162,7 +162,11 @@ class JeonseOrchestrator(BaseAgent):
         async for event in self.consultation_finalizer_agent.run_async(ctx):
             final_text = self._extract_event_text(event)
             if final_text:
-                ctx.session.state[FINAL_ANSWER] = final_text
+                guarded_text = self._apply_identity_guard(final_text)
+                if guarded_text != final_text:
+                    self._replace_event_text(event, guarded_text)
+                    logger.warning("%s [4/4] identity guard sanitized final answer", tag)
+                ctx.session.state[FINAL_ANSWER] = guarded_text
             yield event
 
         final_answer = ctx.session.state.get(FINAL_ANSWER, "")
@@ -331,6 +335,54 @@ class JeonseOrchestrator(BaseAgent):
         parts = getattr(content, "parts", None)
         if parts:
             content.parts = []
+
+    def _apply_identity_guard(self, text: str) -> str:
+        """
+        최종 답변이 타 은행 상담원 정체성을 갖는 것을 방지합니다.
+
+        주의:
+        - "KB의 생각" 같은 참고 근거 제목은 그대로 둘 수 있습니다.
+        - "KB국민은행 상담원입니다"처럼 답변 주체를 잘못 말하는 문구만 교정합니다.
+        """
+        if not text:
+            return text
+
+        replacements = {
+            "KB국민은행 상담원입니다": "GS Bank 전세대출 및 보증 상담 보조 Agent입니다",
+            "국민은행 상담원입니다": "GS Bank 전세대출 및 보증 상담 보조 Agent입니다",
+            "KB Bank 상담원입니다": "GS Bank 전세대출 및 보증 상담 보조 Agent입니다",
+            "KB국민은행입니다": "GS Bank 전세대출 및 보증 상담 보조 Agent입니다",
+            "국민은행입니다": "GS Bank 전세대출 및 보증 상담 보조 Agent입니다",
+            "KB Bank입니다": "GS Bank 전세대출 및 보증 상담 보조 Agent입니다",
+            "KB국민은행 상담 보조 Agent": "GS Bank 전세대출 및 보증 상담 보조 Agent",
+            "국민은행 상담 보조 Agent": "GS Bank 전세대출 및 보증 상담 보조 Agent",
+        }
+
+        guarded = text
+        for source, target in replacements.items():
+            guarded = guarded.replace(source, target)
+
+        return guarded
+
+    def _replace_event_text(self, event: Event, new_text: str) -> None:
+        """
+        사용자 화면에 표시될 finalizer event text를 교체합니다.
+
+        Event/Part 구현이 환경에 따라 immutable일 가능성도 있으므로,
+        실패해도 state와 BigQuery 저장은 guarded_text 기준으로 계속 진행합니다.
+        """
+        content = getattr(event, "content", None)
+        if not content:
+            return
+
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            if getattr(part, "text", None):
+                try:
+                    part.text = new_text
+                except Exception:
+                    logger.warning("failed to replace event text for identity guard", exc_info=True)
+                return
 
     def _extract_event_text(self, event: Event) -> str:
         """Event content에서 텍스트를 추출합니다."""
