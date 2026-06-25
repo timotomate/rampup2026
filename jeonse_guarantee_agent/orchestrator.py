@@ -164,8 +164,8 @@ class JeonseOrchestrator(BaseAgent):
                 ctx.session.state[FINAL_ANSWER] = final_text
             yield event
 
-        consultation_draft = self._read_state_json(ctx, CONSULTATION_DRAFT, default={})
-        logger.info("%s [4/4] 상담 초안 state: %s", tag, consultation_draft)
+        final_answer = ctx.session.state.get(FINAL_ANSWER, "")
+        logger.info("%s [4/4] 최종 답변 state preview: %r", tag, str(final_answer)[:500])
         logger.info("%s ── JeonseOrchestrator turn 종료 ──", tag)
 
     def _build_search_query(

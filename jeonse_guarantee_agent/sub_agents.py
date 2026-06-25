@@ -22,6 +22,7 @@ from .state_keys import (
     QUESTION_CLASSIFICATION,
     EVIDENCE_REVIEW,
     CONSULTATION_DRAFT,
+    FINAL_ANSWER,
 )
 
 
@@ -77,6 +78,5 @@ def build_consultation_finalizer_agent() -> Agent:
         model="gemini-2.5-flash",
         description="상담원용 최종 답변 초안을 작성하는 sub-agent입니다.",
         instruction=CONSULTATION_FINALIZER_INSTRUCTION,
-        output_schema=ConsultationDraft,
-        output_key=CONSULTATION_DRAFT,
+        output_key=FINAL_ANSWER,
     )
