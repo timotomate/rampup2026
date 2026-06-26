@@ -423,10 +423,14 @@ def after_model_log_qa(callback_context: Any, llm_response: Any) -> None:
         from google.cloud import bigquery
 
         client = bigquery.Client(project=PROJECT_ID)
+        # 데모/테스트에서는 같은 session 또는 invocation id가 재사용되어도 로그 누락이 없도록
+        # insertId를 매번 고유하게 만듭니다. BigQuery streaming insert는 동일 insertId를
+        # best-effort de-duplication 대상으로 볼 수 있습니다.
+        insert_id = f"{invocation_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         errors = client.insert_rows_json(
             FULL_TABLE_ID,
             [row],
-            row_ids=[str(invocation_id)],
+            row_ids=[insert_id],
         )
         if errors:
             print(f"[qa-audit-log] BigQuery insert errors: {errors}")
@@ -552,11 +556,16 @@ def log_orchestrated_qa_event(
         print("[qa-audit-log] skipped orchestrated log because it was already written")
         return False
 
-    # 기존 최종 답변 필터가 있으면 재사용합니다.
+    # 오케스트레이터 경로는 consultation_finalizer_agent 이후에만 호출됩니다.
+    # 따라서 답변 헤더가 조금 바뀌어도 BigQuery audit log를 누락하지 않습니다.
+    # 헤더 불일치는 경고로만 남기고 저장은 계속합니다.
     final_filter = globals().get("_looks_like_final_consultation_answer")
-    if callable(final_filter) and not final_filter(answer):
-        print("[qa-audit-log] skipped orchestrated non-final answer")
-        return False
+    if callable(final_filter):
+        try:
+            if not final_filter(answer):
+                print("[qa-audit-log] warning: orchestrated answer does not match final-answer header pattern; logging anyway")
+        except Exception as exc:
+            print(f"[qa-audit-log] warning: final-answer filter failed; logging anyway: {type(exc).__name__}: {exc}")
 
     if not invocation_id or invocation_id == "unknown":
         invocation_id = f"orchestrator-{session_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
@@ -595,10 +604,14 @@ def log_orchestrated_qa_event(
         from google.cloud import bigquery
 
         client = bigquery.Client(project=PROJECT_ID)
+        # 데모/테스트에서는 같은 session 또는 invocation id가 재사용되어도 로그 누락이 없도록
+        # insertId를 매번 고유하게 만듭니다. BigQuery streaming insert는 동일 insertId를
+        # best-effort de-duplication 대상으로 볼 수 있습니다.
+        insert_id = f"{invocation_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         errors = client.insert_rows_json(
             FULL_TABLE_ID,
             [row],
-            row_ids=[str(invocation_id)],
+            row_ids=[insert_id],
         )
 
         if errors:

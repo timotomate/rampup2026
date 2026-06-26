@@ -520,9 +520,9 @@ def _env_flag(name: str, default: str = "FALSE") -> bool:
     }
 
 
-if _env_flag("USE_ORCHESTRATOR_AGENT", "FALSE"):
-    # 실험용 오케스트레이터 root_agent.
-    # 기본값은 FALSE이므로, 명시적으로 켰을 때만 이 경로를 사용합니다.
+if _env_flag("USE_ORCHESTRATOR_AGENT", "TRUE"):
+    # 발표/데모 기본 경로: 오케스트레이터 root_agent.
+    # .env가 배포 패키지에 포함되지 않아도 TRUE 경로가 기본으로 동작하도록 합니다.
     from .orchestrator_factory import build_jeonse_orchestrator_candidate
 
     root_agent = build_jeonse_orchestrator_candidate()
